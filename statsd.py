@@ -28,17 +28,45 @@ from socket import socket, AF_INET, SOCK_DGRAM
 from daemon import runner	# python-daemon
 
 
+class GraphiteClient():
+	def __init__(self):
+		self._server = "graphite.lunasys.fr"
+		self._port = 2003
+
+	def send(self, data):
+		sock = socket()
+		try:
+			sock.connect( (self._server, self._port) )
+		except:
+			print "Couldn't connect to %(server)s on port %(port)d, is carbon-agent.py running?" % { 'server':CARBON_SERVER, 'port':CARBON_PORT }
+			return False
+		lines = []
+		timestamp = time.time()
+		for metric in data:
+			#metric = data[d]
+			lines.append( "%s %s %d" % (metric['name'], metric['val'], timestamp) )
+		message = '\n'.join(lines) + '\n'
+		#print message
+		sock.sendall(message)
+
+
 class Main():
 	_gauges = {}
 	_counters = {}
+	def __init__(self):
+		self.gc = GraphiteClient()
+
 	def handle_data(self, raw_data):
 		data = raw_data.split("|")
+		#print data
 		if len(data)==4:
 			application_tag = data[0]
 			metric_name = data[1]
 			metric_value = data[2]
 			metric_type = data[3]
-			print "TAG:%s METRIC:%s=%s [%s]" % (application_tag, metric_name, metric_value, metric_type)
+			#print "TAG:%s METRIC:%s=%s [%s]" % (application_tag, metric_name, metric_value, metric_type)
+			data = [{'name': "frontend."+application_tag+"."+metric_name, 'val': metric_value, 'type': metric_type}]
+			self.gc.send(data)
 		else:
 			print "Invalid metric length (%d)" % (len(data))
 
@@ -81,6 +109,9 @@ class TCPListenerThread(threading.Thread):
 
 
 class HTTPStatsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+	def log_message(self, format, *args):
+		return
+
 	def do_GET(self):
 		self.send_response(200)
 		self.send_header('Content-type', 'text/html')
@@ -97,13 +128,14 @@ class HTTPStatsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 		#print self.path, form
 		for key in form.keys():
 			val = form[key].value
-			print key, val
-			raw_data = key+"|"+val
+			#print key, val
+			raw_data = val
 			main.handle_data(raw_data)
 		self.send_response(200)
+		self.send_header('Access-Control-Allow-Origin', '*')
 		self.send_header('Content-type', 'text/html')
 		self.end_headers()
-		self.wfile.write("HELLO")
+		self.wfile.write("OK")
 
 
 class HTTPListenerThread(threading.Thread):
