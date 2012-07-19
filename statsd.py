@@ -44,29 +44,78 @@ class GraphiteClient():
 		timestamp = time.time()
 		for metric in data:
 			#metric = data[d]
-			lines.append( "%s %s %d" % (metric['name'], metric['val'], timestamp) )
+			lines.append( "%s %s %d" % (metric[0], metric[1], timestamp) )
 		message = '\n'.join(lines) + '\n'
 		#print message
 		sock.sendall(message)
 
 
+class TaskThread(threading.Thread):
+	def __init__(self):
+		threading.Thread.__init__(self)
+		self._finished = threading.Event()
+		self._interval = 5.0
+
+	def setInterval(self, interval):
+		self._interval = interval
+	
+	def shutdown(self):
+		self._finished.set()
+
+	def run(self):
+		while 1:
+			if self._finished.isSet(): return
+			self.task()
+			self._finished.wait(self._interval)
+
+	def task(self):
+		#print "PUSH & CLEAR"
+		#print main.gauges
+		#print main.averages
+		for metric_name, metric_value in main.gauges.items():
+			main.gc.send([[metric_name, metric_value]])
+		for metric_name, metric_value in main.averages.items():
+			main.gc.send([[metric_name, avg(metric_value)]])
+		main.gauges = {}
+		main.averages = {}
+		main.counters = {}
+
+
 class Main():
-	_gauges = {}
-	_counters = {}
+	gauges = {}
+	averages = {}
+	counters = {}
 	def __init__(self):
 		self.gc = GraphiteClient()
+		self.task = TaskThread()
+		self.task.daemon = True
+		self.task.start()
 
 	def handle_data(self, raw_data):
-		data = raw_data.split("|")
+		data = raw_data.split(":")
 		#print data
-		if len(data)==4:
-			application_tag = data[0]
-			metric_name = data[1]
-			metric_value = data[2]
-			metric_type = data[3]
-			#print "TAG:%s METRIC:%s=%s [%s]" % (application_tag, metric_name, metric_value, metric_type)
-			data = [{'name': "frontend."+application_tag+"."+metric_name, 'val': metric_value, 'type': metric_type}]
-			self.gc.send(data)
+		if len(data)==2 and len(data[1].split("|"))==2:
+			metric_name = data[0]
+			data2 = data[1].split("|")
+			metric_value = data2[0]
+			metric_type = data2[1]
+			#print "METRIC:%s=%s [%s]" % (metric_name, metric_value, metric_type)
+			if metric_type=="r":
+				#print "[RAW] METRIC:%s=%s [%s]" % (metric_name, metric_value, metric_type)
+				self.gc.send([[metric_name, metric_value]])
+			elif metric_type=="g":
+				#print "[GAUGE] METRIC:%s=%s [%s]" % (metric_name, metric_value, metric_type)
+				self.gauges[metric_name] = metric_value
+			elif metric_type=="a":
+				#print "[GAUGE] METRIC:%s=%s [%s]" % (metric_name, metric_value, metric_type)
+				if not metric_name in self.gauges:
+					self.averages[metric_name] = []
+				self.averages[metric_name].append( metric_value )
+			elif metric_type=="c":
+				#print "[GAUGE] METRIC:%s=%s [%s]" % (metric_name, metric_value, metric_type)
+				if not metric_name in self.gauges:
+					self.counters[metric_name] = 0
+				self.counters[metric_name]+= metric_value
 		else:
 			print "Invalid metric length (%d)" % (len(data))
 
@@ -86,7 +135,7 @@ class UDPListenerThread(threading.Thread):
 		threading.Thread.__init__(self)
 
 	def run(self):
-		HOST, PORT = "127.0.0.1", 10001
+		HOST, PORT = "0.0.0.0", 10001
 		server = SocketServer.UDPServer((HOST, PORT), UDPStatsHandler)
 		server.serve_forever()
 
@@ -103,7 +152,7 @@ class TCPListenerThread(threading.Thread):
 		threading.Thread.__init__(self)
 
 	def run(self):
-		HOST, PORT = "127.0.0.1", 10001
+		HOST, PORT = "0.0.0.0", 10001
 		server = SocketServer.TCPServer((HOST, PORT), TCPStatsHandler)
 		server.serve_forever()
 
