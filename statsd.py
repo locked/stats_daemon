@@ -38,7 +38,7 @@ class GraphiteClient():
 		try:
 			sock.connect( (self._server, self._port) )
 		except:
-			print "Couldn't connect to %(server)s on port %(port)d, is carbon-agent.py running?" % { 'server':CARBON_SERVER, 'port':CARBON_PORT }
+			print "Couldn't connect to %(server)s on port %(port)d, is carbon-agent.py running?" % { 'server':self._server, 'port':self._port }
 			return False
 		lines = []
 		timestamp = time.time()
@@ -63,6 +63,7 @@ class TaskThread(threading.Thread):
 		self._finished.set()
 
 	def run(self):
+		#time.sleep(2)
 		while 1:
 			if self._finished.isSet(): return
 			self.task()
@@ -87,9 +88,6 @@ class Main():
 	counters = {}
 	def __init__(self):
 		self.gc = GraphiteClient()
-		self.task = TaskThread()
-		self.task.daemon = True
-		self.task.start()
 
 	def handle_data(self, raw_data):
 		data = raw_data.split(":")
@@ -208,6 +206,7 @@ class App():
 		self._graphite = None
 
 	def run(self):
+		time.sleep(2)
 		listener = UDPListenerThread()
 		listener.daemon = True
 		listener.start()
@@ -217,6 +216,10 @@ class App():
 		listener = HTTPListenerThread()
 		listener.daemon = True
 		listener.start()
+
+		task = TaskThread()
+		task.daemon = True
+		task.start()
 		
 		while True:
 			time.sleep( 10 )
