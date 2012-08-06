@@ -24,14 +24,49 @@ import threading
 import SocketServer
 import BaseHTTPServer
 import cgi
+import hashlib
 from socket import socket, AF_INET, SOCK_DGRAM
 from daemon import runner	# python-daemon
 
 
-class GraphiteClient():
+class Access():
 	def __init__(self):
-		self._server = "graphite.lunasys.fr"
-		self._port = 2003
+		self._server = "localhost"
+		self._port = 80
+
+	def auth_ip(self, user_uuid, ip):
+		# Call REST API to get allowed IPs
+		valid_ips = ['82.216.246.132']
+		return ip in valid_ips
+
+	def auth_origin(self, user_uuid, origin, token):
+		# Call REST API to get clear_token
+		valid_token = '62fbaa0c29bfe2c5b85444b53419e39ebb896e58'
+		hash_token = token+'HYPERION'
+		for i in xrange(0,100):
+			hash_token = hashlib.sha1(hash_token).hexdigest()
+		#print hash_token
+		if hash_token==valid_token:
+			return True
+		return False
+	
+	def auth(self, user_uuid, auth_data):
+		if not ( 'ip' in auth_data or 'origin' in auth_data ):
+			# No auth method available
+			return False
+		auth_res = True
+		if 'ip' in auth_data:
+			auth_res = auth_res and self.auth_ip(user_uuid, auth_data['ip'])
+		if 'origin' in auth_data:
+			auth_res = auth_res and self.auth_origin(user_uuid, auth_data['origin'], auth_data['token'])
+		return auth_res
+
+
+
+class GraphiteClient():
+	def __init__(self, server="localhost", port=2003):
+		self._server = server
+		self._port = port
 
 	def send(self, data):
 		sock = socket()
@@ -87,16 +122,22 @@ class Main():
 	averages = {}
 	counters = {}
 	def __init__(self):
-		self.gc = GraphiteClient()
+		self.gc = GraphiteClient("graphite.lunasys.fr")
 
-	def handle_data(self, raw_data):
+	def handle_data(self, raw_data, auth_data):
 		data = raw_data.split(":")
 		#print data
+		a = Access()
 		if len(data)==2 and len(data[1].split("|"))==2:
 			metric_name = data[0]
 			data2 = data[1].split("|")
 			metric_value = data2[0]
 			metric_type = data2[1]
+			metric_names = metric_name.split(".")
+			user_uuid = metric_names[0]
+			if not a.auth(user_uuid, auth_data):
+				print "Auth error"
+				return False
 			#print "METRIC:%s=%s [%s]" % (metric_name, metric_value, metric_type)
 			if metric_type=="r":
 				#print "[RAW] METRIC:%s=%s [%s]" % (metric_name, metric_value, metric_type)
@@ -121,12 +162,15 @@ class Main():
 main = Main()
 
 
+# UDP
 class UDPStatsHandler(SocketServer.BaseRequestHandler):
 	def handle(self):
+		ip = self.client_address[0]
+		auth_data = {'ip': ip}
 		#data = self.request.recv(1024).strip() # tcp
 		raw_data = self.request[0].strip() # udp
 		#socket = self.request[1]
-		main.handle_data(raw_data)
+		main.handle_data(raw_data, auth_data)
 
 class UDPListenerThread(threading.Thread):
 	def __init__(self):
@@ -138,12 +182,15 @@ class UDPListenerThread(threading.Thread):
 		server.serve_forever()
 
 
+# TCP
 class TCPStatsHandler(SocketServer.BaseRequestHandler):
 	def handle(self):
+		ip = self.client_address[0]
+		auth_data = {'ip': ip}
 		#data = self.request.recv(1024).strip() # tcp
 		raw_data = self.request[0].strip() # udp
 		#socket = self.request[1]
-		main.handle_data(raw_data)
+		main.handle_data(raw_data, auth_data)
 
 class TCPListenerThread(threading.Thread):
 	def __init__(self):
@@ -155,6 +202,7 @@ class TCPListenerThread(threading.Thread):
 		server.serve_forever()
 
 
+# HTTP
 class HTTPStatsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 	def log_message(self, format, *args):
 		return
@@ -172,17 +220,36 @@ class HTTPStatsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 			environ={'REQUEST_METHOD':'POST',
 					'CONTENT_TYPE':self.headers['Content-Type'],
 			})
-		#print self.path, form
-		for key in form.keys():
-			val = form[key].value
-			#print key, val
-			raw_data = val
-			main.handle_data(raw_data)
-		self.send_response(200)
+		#print self.headers
+
+		auth_data = {}
+		head_origin = ""
+		for k, v in self.headers.items():
+			if k.strip()=='origin':
+				head_origin = str(v)
+		auth_data['origin'] = head_origin
+
+		error = False
+		if head_origin=="":
+			error = "origin"
+		else:
+			for key in form.keys():
+				val = form[key].value
+				if key=='m':
+					if 'token' in auth_data:
+						raw_data = val
+						main.handle_data(raw_data, auth_data)
+					else:
+						error = 'token'
+				elif key=='auth':
+					auth_token = val
+					auth_data['token'] = auth_token
+		#print error
+		self.send_response(500 if error else 200)
 		self.send_header('Access-Control-Allow-Origin', '*')
 		self.send_header('Content-type', 'text/html')
 		self.end_headers()
-		self.wfile.write("OK")
+		self.wfile.write(error if error else "OK")
 
 
 class HTTPListenerThread(threading.Thread):
@@ -200,7 +267,11 @@ class App():
 		self.stderr_path = '/dev/tty'
 		self.pidfile_path = '/tmp/foo.pid'
 		self.pidfile_timeout = 5
-	
+
+		if sys.argv[1]=="restart" and not os.path.exists(self.pidfile_path):
+			print "Not running."
+			sys.exit(0)
+
 		self._stats = {}
 		self._global_lock = threading.Lock()
 		self._graphite = None
